@@ -1,0 +1,564 @@
+---
+title: Time Series Analysis of Carbon Prices and Trading Activity in China’s National
+  Emissions Trading System (2021–2026)
+author: "Yangsen Zhang, Yiting He & He Gao"
+date: "Spring 2026"
+output:
+  pdf_document:
+    number_sections: true
+    fig_caption: true
+  html_document:
+    df_print: paged
+header-includes:
+- \usepackage{booktabs}
+- \usepackage{float}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center"
+)
+
+library(tidyverse)
+library(readxl)
+library(janitor)
+library(knitr)
+library(kableExtra)
+library(here)
+
+here()
+```
+
+# Rationale and Research Questions
+
+China’s national emissions trading system (ETS) is an important environmental policy instrument for climate governance and emissions reduction (Ministry of Ecology and Environment of the People’s Republic of China, 2025; World Bank, 2024). As a market-based mechanism, the ETS places a price on carbon emissions and is intended to encourage regulated firms to reduce emissions more efficiently (Ellerman et al., 2010; Martin et al., 2016). Examining carbon price patterns and trading activity over time can help us better understand how this environmental market has developed since its launch.
+
+This project uses daily trading data from China’s national carbon market to examine price trends and market activity over time. The project focuses on three research questions:
+
+How have carbon prices in China’s national ETS changed over time?
+How has trading activity changed over time?
+Is trading volume associated with carbon price levels or price fluctuation?
+
+These questions are environmentally relevant because carbon prices and trading volume reflect the operation of a major climate policy instrument (World Bank, 2024). Understanding these patterns can provide insight into market development, participation, and the functioning of China’s national carbon market (Ministry of Ecology and Environment of the People’s Republic of China, 2026).
+
+# Dataset Information
+
+This project uses daily trading data from China’s national carbon market from 2021 to 2026. The data were obtained from the Shanghai Environment and Energy Exchange (https://shyx.cneeex.com/).
+
+This dataset is environmentally relevant because China’s national emissions trading system (ETS) is an environmental policy tool for emissions reduction. The market data reflect how this regulatory system operates over time.
+
+The dataset includes daily observations such as date, opening price, highest price, lowest price, closing price, trading volume, trading value, cumulative trading volume, and cumulative trading value.
+
+The data begin in July 2021 and end in March 2026. Since the dataset starts after the launch of the national ETS, this project focuses on trends and patterns within the market over time.
+
+# Exploration of Raw Data
+
+The raw dataset was first imported from the Excel file and inspected to understand its structure, time coverage, and overall data quality. During this step, the original Chinese variable names were translated into English within R, and the date field was standardized for later analysis. Because the raw file contained mixed date formats, date parsing was handled carefully in the workflow.
+
+```{r import-raw-data, echo=FALSE, message=FALSE, warning=FALSE}
+carbon_raw <- read_excel(
+ "2021-2026全国碳交易市场日度交易数据.xlsx",
+  skip = 1
+) %>%
+  rename(
+    year_label = `年份`,
+    date_label = `日期`,
+    listed_trade_volume_ton = `挂牌协议交易成交量（吨）`,
+    listed_trade_value_yuan = `挂牌协议交易成交额（元）`,
+    block_trade_volume_ton = `大宗协议交易成交量（吨）`,
+    block_trade_value_yuan = `大宗协议成交额（元）`,
+    high_price_yuan_per_ton = `最高价(元/吨)`,
+    low_price_yuan_per_ton = `最低价(元/吨)`,
+    close_price_yuan_per_ton = `收盘价(元/吨)`,
+    open_price_yuan_per_ton = `开盘价(元/吨)`,
+    cumulative_volume_ton = `累计成交量（吨）`,
+    cumulative_value_yuan = `累计成交额（元）`,
+    auction_volume_ton = `单向竞价成交量（吨）`,
+    auction_value_yuan = `单向竞价成交额（元）`
+  )
+
+# create a standardized date variable
+# the raw dataset contains mixed date formats, so both month-day strings
+# and full datetime strings are handled here
+carbon_raw <- carbon_raw %>%
+  mutate(
+    year_num = str_remove(as.character(year_label), "年"),
+    date_chr = str_trim(as.character(date_label)),
+    date_num = suppressWarnings(as.numeric(date_chr)),
+    date = case_when(
+      # case 1: dates like "07月19日"
+      str_detect(date_chr, "月") ~ ymd(
+        paste0(
+          year_num, "-",
+          str_replace_all(str_replace_all(date_chr, "月", "-"), "日", "")
+        )
+      ),
+      # case 2: dates already stored as Excel serial numbers
+      !is.na(date_num) ~ as.Date(date_num, origin = "1899-12-30"),
+      # case 3: dates like "2026-03-16" or "2026-03-16 00:00:00"
+      str_detect(date_chr, "^\\d{4}-\\d{1,2}-\\d{1,2}") ~
+        as.Date(str_extract(date_chr, "^\\d{4}-\\d{1,2}-\\d{1,2}")),
+      TRUE ~ as.Date(NA)
+    )
+  )
+
+raw_overview <- tibble(
+  Metric = c(
+    "Number of observations",
+    "Number of variables",
+    "Start date",
+    "End date",
+    "Duplicate rows"
+  ),
+  Value = c(
+    nrow(carbon_raw),
+    ncol(carbon_raw),
+    as.character(min(carbon_raw$date, na.rm = TRUE)),
+    as.character(max(carbon_raw$date, na.rm = TRUE)),
+    sum(duplicated(carbon_raw))
+  )
+)
+
+kable(
+  raw_overview,
+  caption = "Overview of the Raw Dataset",
+  booktabs = TRUE
+) %>%
+  kable_styling(full_width = FALSE, position = "center")
+```
+Table 1 shows that the raw dataset contains daily observations from July 19, 2021 to March 27, 2026. This confirms that the dataset covers the full available period of China’s national ETS trading data used in this project.
+
+```{r raw-data-missing-check, echo=FALSE}
+missing_key <- carbon_raw %>%
+  summarise(
+    missing_date = sum(is.na(date)),
+    missing_open_price = sum(is.na(open_price_yuan_per_ton)),
+    missing_close_price = sum(is.na(close_price_yuan_per_ton)),
+    missing_listed_volume = sum(is.na(listed_trade_volume_ton)),
+    missing_block_volume = sum(is.na(block_trade_volume_ton))
+  ) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "Variable",
+    values_to = "Missing_Count"
+  )
+
+kable(
+  missing_key,
+  caption = "Missing Values for Selected Key Variables"
+) %>%
+  kable_styling(full_width = FALSE, position = "center")
+```
+
+Inspection of the raw dataset showed no missing values in the key date, price, and trading volume variables used later in the analysis. 
+
+# Data Wrangling
+
+After inspecting the raw dataset, the data were cleaned and transformed to prepare them for analysis. The main goals of this step were to retain the key market variables, create additional variables for time-series analysis, and produce both daily and monthly processed datasets.
+
+```{r wrangle-data, echo=FALSE, message=FALSE, warning=FALSE}
+# keep the main variables needed for analysis
+carbon_clean <- carbon_raw %>%
+  select(
+    date,
+    open_price_yuan_per_ton,
+    high_price_yuan_per_ton,
+    low_price_yuan_per_ton,
+    close_price_yuan_per_ton,
+    listed_trade_volume_ton,
+    listed_trade_value_yuan,
+    block_trade_volume_ton,
+    block_trade_value_yuan,
+    auction_volume_ton,
+    auction_value_yuan,
+    cumulative_volume_ton,
+    cumulative_value_yuan
+  ) %>%
+  arrange(date) %>%mutate(
+  year = year(date),
+  month = month(date),
+  month_label = month(date, label = TRUE, abbr = TRUE),
+  time_index = row_number(),
+  total_volume_ton = coalesce(listed_trade_volume_ton, 0) +
+    coalesce(block_trade_volume_ton, 0) +
+    coalesce(auction_volume_ton, 0),
+  total_value_yuan = coalesce(listed_trade_value_yuan, 0) +
+    coalesce(block_trade_value_yuan, 0) +
+    coalesce(auction_value_yuan, 0),
+  price_range_yuan_per_ton = high_price_yuan_per_ton - low_price_yuan_per_ton,
+  daily_price_change = close_price_yuan_per_ton - lag(close_price_yuan_per_ton),
+  daily_return_pct = (close_price_yuan_per_ton - lag(close_price_yuan_per_ton)) /
+    lag(close_price_yuan_per_ton) * 100
+)
+
+# create a monthly summary dataset to reduce daily noise
+carbon_monthly <- carbon_clean %>%
+  group_by(year, month, month_label) %>%
+  summarise(
+    monthly_mean_close_price = mean(close_price_yuan_per_ton, na.rm = TRUE),
+    monthly_mean_open_price = mean(open_price_yuan_per_ton, na.rm = TRUE),
+    monthly_mean_high_price = mean(high_price_yuan_per_ton, na.rm = TRUE),
+    monthly_mean_low_price = mean(low_price_yuan_per_ton, na.rm = TRUE),
+    monthly_total_volume = sum(total_volume_ton, na.rm = TRUE),
+    monthly_total_value = sum(total_value_yuan, na.rm = TRUE),
+    monthly_mean_price_range = mean(price_range_yuan_per_ton, na.rm = TRUE),
+    n_trading_days = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(year, month) %>%
+  mutate(
+    month_date = ymd(paste(year, month, "01", sep = "-"))
+  )
+
+# save processed datasets
+write_csv(carbon_clean, "carbon_market_daily_clean.csv")
+write_csv(carbon_monthly, "carbon_market_monthly_summary.csv")
+
+```
+
+The cleaned daily dataset retains the main price and trading variables while adding several variables needed for later analysis. These include year, month, a continuous time index, total trading volume, total trading value, daily price range, daily price change, and daily percentage return.
+
+A separate monthly summary dataset was created to reduce daily noise and support clearer visualization of longer-term patterns in price and trading activity. Both processed datasets were generated entirely within R and saved to the data/processed/ directory.
+
+# Exploration of Processed Data
+
+After cleaning the raw data and constructing daily and monthly datasets, the processed data were explored to identify broad trends in carbon prices, trading activity, and price variation. Because daily observations can be noisy, both daily and monthly views were used in the exploratory analysis.
+
+```{r processed-data-summary, echo=FALSE, message=FALSE, warning=FALSE}
+# create a simple annual summary for reference in the discussion
+annual_summary <- carbon_clean %>%
+  group_by(year) %>%
+  summarise(
+    n_trading_days = n(),
+    mean_close_price = mean(close_price_yuan_per_ton, na.rm = TRUE),
+    median_close_price = median(close_price_yuan_per_ton, na.rm = TRUE),
+    mean_total_volume = mean(total_volume_ton, na.rm = TRUE),
+    mean_price_range = mean(price_range_yuan_per_ton, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+ggplot(carbon_monthly, aes(x = month_date, y = monthly_mean_close_price)) +
+  geom_line(linewidth = 0.9, color = "black") +
+  geom_point(size = 1.8, color = "black") +
+  labs(
+    title = "Monthly Average Closing Price in China's National ETS",
+    x = "Date",
+    y = "Average Closing Price (yuan/ton)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+```
+Figure 1 shows that the monthly average closing price did not increase in a smooth linear pattern. Prices were relatively low in late 2021, remained fairly stable through 2022 and early 2023, then rose sharply during late 2023 and 2024. After peaking above 100 yuan per ton in late 2024, prices declined during 2025 before showing a partial recovery in early 2026.
+
+```{r figure_2, echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(carbon_monthly, aes(x = month_date, y = monthly_total_volume)) +
+  geom_col(fill = "black", width = 25) +
+  labs(
+    title = "Monthly Trading Volume in China's National ETS",
+    x = "Date",
+    y = "Monthly Total Volume (tons)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+```
+Figure 2 shows that monthly trading volume fluctuated substantially over time and was concentrated in several distinct peaks rather than following a smooth trend. Trading activity appears especially uneven across the study period, with some months showing very limited activity and others showing sharp spikes. Because 2026 includes only data through March, the final year represents a partial year and should be interpreted with caution.
+
+```{r figure_3, echo=FALSE, fig.width=9, fig.height=5, message=FALSE, warning=FALSE}
+ggplot(carbon_clean, aes(x = factor(year), y = close_price_yuan_per_ton)) +
+  geom_boxplot(fill = "grey", color = "black", outlier.alpha = 0.4) +
+  labs(
+    title = "Distribution of Daily Closing Prices by Year",
+    x = "Year",
+    y = "Closing Price (yuan/ton)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+```
+Figure 3 compares the distribution of daily closing prices across years. The boxplot suggests that price levels shifted upward from 2021 to 2024, with 2024 showing the highest median and generally the highest price range. In 2025, the distribution moved downward and became more dispersed, indicating both lower typical prices and greater variability than in 2024. The 2026 distribution appears more concentrated around 80 yuan per ton, but it should be interpreted cautiously because it represents only a partial year.
+
+```{r figure_4, echo=FALSE, fig.width=8, fig.height=5, message=FALSE, warning=FALSE}
+ggplot(carbon_clean, aes(x = total_volume_ton, y = close_price_yuan_per_ton)) +
+  geom_point(alpha = 0.4, color = "black") +
+  geom_smooth(method = "lm", se = TRUE, color = "blue", linewidth = 0.9) +
+  labs(
+    title = "Closing Price and Trading Volume",
+    x = "Total Trading Volume (tons)",
+    y = "Closing Price (yuan/ton)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+```
+
+Figure 4 shows the relationship between daily trading volume and closing price. Most observations are concentrated at relatively low trading volumes, while a smaller number of days show very large spikes in volume. The fitted line suggests a weak positive association between trading volume and closing price, but the relationship appears highly dispersed. This indicates that trading volume alone is unlikely to explain much of the variation in carbon prices and that formal modeling is needed to evaluate the relationship more carefully.
+
+# Hypotheses
+
+Based on the exploratory analysis, this project focuses on three hypotheses about price trends and trading activity in China’s national emissions trading system (ETS).
+
+**H1:** The closing price of carbon allowances increased over time from 2021 to 2026.  
+
+This hypothesis uses daily closing price as the dependent variable and time as the explanatory variable. Based on the processed data, we expect the overall time trend to be positive, although not perfectly linear.
+
+**H2:** Trading activity varied substantially over time in China’s national ETS.  
+
+This hypothesis uses total trading volume as the dependent variable and time as the explanatory variable. The exploratory analysis suggests that trading volume did not follow a smooth trend, but instead showed uneven activity with several distinct peaks.
+
+**H3:** Higher trading volume is associated with carbon price behavior.  
+
+This hypothesis examines whether total trading volume is related to either the level of closing prices or the size of daily price fluctuations. The dependent variable is either closing price or daily price range, and the explanatory variable is total trading volume.
+
+These hypotheses are environmentally relevant because carbon prices and trading activity reflect the operation of a major climate policy instrument. Changes in these variables may provide insight into market development, participation, and the functioning of China’s national carbon market over time.
+
+# Analysis
+
+## Question 1: Did carbon prices increase over time?
+
+This question evaluates whether carbon prices in China’s national ETS showed an overall trend over the study period. We use daily closing price as the dependent variable and time as the explanatory variable.
+
+### Model
+
+```{r model_price_trend, echo=FALSE, message=FALSE, warning=FALSE}
+# linear model for carbon price trend over time
+price_trend_model <- lm(close_price_yuan_per_ton ~ time_index, data = carbon_clean)
+
+price_trend_summary <- summary(price_trend_model)
+price_trend_summary
+```
+The linear regression results indicate a significant positive relationship between closing price and time. The coefficient for `time_index` is positive (Estimate = 0.0318, p < 2e-16), suggesting that carbon prices increased on average over the study period. The model explains about 39.9% of the variation in daily closing prices (R² = 0.399), which indicates that time captures an important but incomplete part of the overall price pattern.
+
+### Assumptions
+
+```{r Assumptions, echo=FALSE, message=FALSE, warning=FALSE}
+# check basic multicollinearity is not needed here because there is only one predictor
+# inspect distribution of residuals and model diagnostics instead
+par(mfrow = c(2, 2))
+plot(price_trend_model)
+par(mfrow = c(1, 1))
+```
+
+The diagnostic plots suggest that the simple linear model captures the overall upward trend, but it does not fully represent the structure of the data. The residuals show visible curvature in the residuals-versus-fitted plot, indicating that the relationship is not perfectly linear across the full period. The Q-Q plot also shows departures from normality, and the scale-location plot suggests non-constant variance. These patterns are not surprising because the carbon price series contains distinct phases of increase, decline, and recovery rather than a single smooth linear trend.
+
+### Closing Price Over Time
+
+```{r figure_5, echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(carbon_clean, aes(x = date, y = close_price_yuan_per_ton)) +
+  geom_point(alpha = 0.35, color = "black") +
+  geom_smooth(method = "lm", se = TRUE, color = "black", linewidth = 0.9) +
+  labs(
+    title = "Daily Closing Price Over Time",
+    x = "Date",
+    y = "Closing Price (yuan/ton)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+```
+
+Figure 5 shows the daily closing prices together with the fitted linear trend. The fitted line slopes upward, which is consistent with the regression result and supports the hypothesis that carbon prices increased over time. At the same time, the scatterplot makes clear that the increase was not smooth: prices remained relatively stable in 2022 and early 2023, rose sharply in late 2023 and 2024, declined during 2025, and then partially recovered in early 2026.
+
+Overall, the results support H1. Carbon prices in China’s national ETS increased significantly over the study period, but the residual patterns suggest that a simple linear model is only a first approximation. The market followed a broad upward trajectory, yet the time series also includes substantial short-term fluctuations and non-linear changes that are not fully captured by a single straight-line trend.
+
+## Question 2: Did trading activity change over time?
+
+This question examines whether trading activity in China’s national ETS changed systematically over the study period. Daily total trading volume is used as the response variable, and time is used as the explanatory variable. Because trading volume is highly skewed and contains several extreme spikes, both a raw-volume model and a log-transformed model are estimated.
+
+### Model
+```{r model-volume-trend, echo=FALSE, message=FALSE, warning=FALSE}
+volume_trend_model <- lm(total_volume_ton ~ time_index, data = carbon_clean)
+summary(volume_trend_model)
+
+volume_trend_log_model <- lm(log(total_volume_ton + 1) ~ time_index, data = carbon_clean)
+summary(volume_trend_log_model)
+```
+
+The raw-volume model indicates a significant positive relationship between trading volume and time (Estimate = 455.2, p = 0.00177), but its explanatory power is extremely weak (R² = 0.0086). This suggests that raw trading volume is heavily influenced by a small number of extreme trading days and does not follow a stable linear pattern.
+
+The log-transformed model also shows a significant positive relationship between trading volume and time (Estimate = 0.00480, p < 2e-16), and it provides a substantially better fit than the raw model (R² = 0.1599). For this reason, the log-transformed specification is more useful for interpreting the overall trend in trading activity.
+
+### Assumptions
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+par(mfrow = c(2, 2))
+plot(volume_trend_log_model)
+par(mfrow = c(1, 1))
+
+```
+The diagnostic plots suggest that the log transformation improves the model, but it does not fully eliminate departures from model assumptions. Residual patterns remain visible, the Q-Q plot shows some deviation in the tails, and the scale-location plot suggests remaining heteroskedasticity. Even so, the log-transformed model is more appropriate than the raw-volume model for summarizing the overall time trend in trading activity.
+
+### Trading Volume Over Time
+```{r figure_6, echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(carbon_clean, aes(x = date, y = total_volume_ton)) +
+  geom_point(alpha = 0.35, color = "black") +
+  geom_smooth(method = "lm", se = TRUE, color = "black", linewidth = 0.9) +
+  labs(
+    title = "Daily Trading Volume Over Time",
+    x = "Date",
+    y = "Total Trading Volume (tons)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+```
+
+Figure 6 shows the daily trading volume together with the fitted linear trend. The fitted line slopes upward, suggesting that trading activity increased overall during the study period. However, the scatterplot also shows that the increase was highly uneven: most trading days had relatively low volume, while a limited number of days exhibited very large spikes. This pattern suggests that trading activity became more active over time, but not in a smooth or continuous way.
+
+Overall, the results support H2. Trading activity in China’s national ETS changed significantly over time, but the pattern was highly irregular. The raw-volume model is dominated by extreme observations and explains very little of the variation in daily trading volume, whereas the log-transformed model indicates a clearer positive time trend. These results suggest that market activity increased overall, but in concentrated bursts rather than through steady day-to-day growth.
+
+```{r figure_7, echo=FALSE, fig.width=10, fig.height=5, message=FALSE, warning=FALSE}
+ggplot(carbon_clean, aes(x = date, y = log(total_volume_ton + 1))) +
+  geom_point(alpha = 0.35, color = "black") +
+  geom_smooth(method = "lm", se = TRUE, color = "black", linewidth = 0.9) +
+  labs(
+    title = "Log Daily Trading Volume Over Time",
+    x = "Date",
+    y = "Log Total Trading Volume"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+```
+Figure 7 shows the log-transformed daily trading volume over time. The upward-sloping fitted line suggests that trading activity increased overall from 2021 to 2026. Compared with the raw-volume figure, the log transformation reveals the broader pattern more clearly by reducing the influence of a small number of extreme trading days. However, the distribution of points still shows considerable day-to-day variation, which suggests that the growth in trading activity was irregular and uneven rather than smooth and continuous.
+
+## Question 3: Is trading volume associated with carbon price behavior?
+
+This question examines whether trading activity is associated with carbon price behavior in China’s national ETS. Two related models are used. The first tests whether trading volume is associated with daily closing price, and the second tests whether trading volume is associated with daily price fluctuation, measured here as the daily price range. Because trading volume is highly skewed, the explanatory variable is log-transformed.
+
+### Model 1: Trading Volume and Closing Price
+```{r model-price-volume, echo=FALSE, message=FALSE, warning=FALSE}
+price_volume_model <- lm(close_price_yuan_per_ton ~ log(total_volume_ton + 1), data = carbon_clean)
+summary(price_volume_model)
+```
+
+The results show a significant positive association between trading volume and daily closing price. The coefficient for `log(total_volume_ton + 1)` is positive (Estimate = 1.0225, p < 2e-16), suggesting that days with higher trading volume tend to have higher closing prices. However, the model explains only a modest share of the variation in closing price (R² = 0.0593), indicating that trading volume alone is not a strong predictor of price level.
+
+### Model 2: Trading Volume and Price Range
+```{r model-2, echo=FALSE, message=FALSE, warning=FALSE}
+range_volume_model <- lm(price_range_yuan_per_ton ~ log(total_volume_ton + 1), data = carbon_clean)
+summary(range_volume_model)
+```
+The results also show a significant positive association between trading volume and daily price range. The coefficient for `log(total_volume_ton + 1)` is positive (Estimate = 0.1272, p < 2e-16), suggesting that days with higher trading activity tend to exhibit larger within-day price fluctuations. This model explains somewhat more variation than the closing-price model (R² = 0.1019), but its explanatory power is still limited overall.
+
+
+### Assumptions
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# diagnostic plots for price-volume model
+par(mfrow = c(2, 2))
+plot(price_volume_model)
+par(mfrow = c(1, 1))
+# diagnostic plots for range-volume model
+par(mfrow = c(2, 2))
+plot(range_volume_model)
+par(mfrow = c(1, 1))
+
+```
+
+The diagnostic plots suggest that the fitted relationship between trading volume and price behavior is statistically meaningful but not ideal in a strict linear-model sense. The residuals-versus-fitted plot shows some remaining structure, the Q-Q plot indicates noticeable deviation from normality in the upper tail, and the scale-location plot suggests non-constant variance. These patterns are not surprising because market activity and price fluctuation are both highly uneven and concentrated in certain trading periods. The model is therefore useful as a simplified summary of association rather than a complete description of market dynamics.
+
+### Closing Price by Trading Volume
+```{r figure_8, echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(carbon_clean, aes(x = log(total_volume_ton + 1), y = close_price_yuan_per_ton)) +
+  geom_point(alpha = 0.4, color = "black") +
+  geom_smooth(method = "lm", se = TRUE, color = "blue", linewidth = 0.9) +
+  labs(
+    title = "Closing Price by Trading Volume",
+    x = "Log Total Trading Volume",
+    y = "Closing Price (yuan/ton)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+```
+Figure 8 shows a positive relationship between trading volume and daily closing price. The fitted line slopes upward, indicating that higher-volume days tend to be associated with higher price levels. At the same time, the scatterplot is widely dispersed, especially at moderate and high trading volumes, which suggests that trading volume is only one of several factors shaping daily prices.
+
+### Price Range by Trading Volume
+```{r figure_9, echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(carbon_clean, aes(x = log(total_volume_ton + 1), y = price_range_yuan_per_ton)) +
+  geom_point(alpha = 0.4, color = "black") +
+  geom_smooth(method = "lm", se = TRUE, color = "blue", linewidth = 0.9) +
+  labs(
+    title = "Daily Price Range by Trading Volume",
+    x = "Log Total Trading Volume",
+    y = "Price Range (yuan/ton)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+```
+Figure 9 shows a positive relationship between trading volume and daily price range. As trading volume increases, the fitted line also rises, suggesting that more active trading days tend to have greater within-day price fluctuation. The points are still highly scattered, but the upward pattern is clearer here than in the closing-price model, which is consistent with the somewhat higher R² for Model 2.
+
+Overall, the results provide support for H3. Higher trading volume is significantly associated with both higher closing prices and larger daily price ranges. However, both models have relatively low explanatory power, which means that trading activity captures only part of carbon price behavior. These findings suggest that active trading is linked to stronger price movement, but that other institutional or market factors are also important.
+
+# Summary and Discussion
+
+The analyses in this project examined three main questions about China’s national emissions trading system (ETS): whether carbon prices increased over time, whether trading activity changed over time, and whether trading volume was associated with carbon price behavior.
+
+For Question 1, the linear regression results showed a significant positive relationship between closing price and time. The coefficient for `time_index` was positive and highly significant, indicating that carbon prices increased overall during the study period. The fitted trend line and exploratory plots both suggest that this increase was not smooth, but instead reflected several distinct phases: relatively low prices in 2021, stability through much of 2022 and early 2023, a sharp increase in late 2023 and 2024, a decline during 2025, and a partial recovery in early 2026. Although the simple linear model captured the overall upward direction, the diagnostic plots indicated that the price series was not perfectly linear and still contained substantial structure beyond a single straight-line trend.
+
+For Question 2, the analysis showed that trading activity also changed significantly over time. The raw-volume model was statistically significant, but its explanatory power was extremely weak, reflecting the fact that daily trading volume was dominated by a small number of extreme spikes. The log-transformed model provided a more stable summary and also indicated a significant positive time trend. Taken together with the daily and monthly exploratory plots, these results suggest that trading activity increased overall, but did so in an uneven and highly concentrated way. Rather than growing steadily, market activity appears to have intensified during specific periods of heightened trading.
+
+For Question 3, both models showed significant positive associations between trading volume and carbon price behavior. Higher trading volume was associated with higher daily closing prices, and it was also associated with larger within-day price ranges. The positive relationship was clearer for daily price range than for closing price, although both models had relatively low explanatory power. This suggests that trading activity is related to carbon price behavior, but that it explains only part of the overall variation in prices and volatility.
+
+Overall, the findings support all three hypotheses. Carbon prices increased over time, trading activity changed over time, and higher trading volume was associated with stronger price behavior. At the same time, the results also show that China’s national ETS did not evolve in a smooth or uniform way. Both prices and trading activity were shaped by irregular phases, concentrated spikes, and non-linear changes. This pattern is consistent with the interpretation of the national ETS as a developing policy market rather than a mature, fully stabilized trading system.
+
+From an environmental perspective, these results matter because the carbon market is not simply a financial mechanism; it is also a policy instrument intended to support emissions reduction. Changes in prices and trading activity may reflect shifts in market participation, compliance behavior, regulatory expectations, and the broader institutional development of the ETS. In this sense, the observed upward trend in prices and the uneven expansion of trading activity suggest that the market has become more active and economically meaningful over time, even if its dynamics remain irregular.
+
+# Limitations
+
+Several limitations should be considered when interpreting the results of this project.
+
+First, the dataset begins after the launch of China’s national ETS. As a result, the project cannot evaluate conditions before and after market implementation, and it cannot be used to make a causal claim about the effect of the ETS launch itself. The analysis is limited to trends and associations within the post-launch period.
+
+Second, the models used in this project are intentionally simple. Linear regression provides a clear and accessible way to summarize broad patterns, but the diagnostic plots show that several model assumptions are not fully satisfied. In particular, the data include non-linearity, heteroskedasticity, and departures from normality. These issues suggest that the models should be interpreted as simplified summaries rather than precise descriptions of the full market process.
+
+Third, trading volume and carbon prices are likely influenced by factors not included in the dataset. These may include policy changes, compliance deadlines, market expectations, firm behavior, and broader economic conditions. Because these explanatory variables are not incorporated into the models, the analyses cannot determine why specific price changes or trading spikes occurred.
+
+Fourth, the project uses market-level daily transaction data only. It does not include firm-level emissions, allowance allocation, compliance outcomes, or sector-specific behavior. As a result, the analysis cannot directly assess whether changes in market activity corresponded to actual emissions reductions or improved environmental performance.
+
+Finally, the final year in the dataset, 2026, includes only data through March. This means that 2026 represents a partial year and should be interpreted cautiously when compared with complete years in the rest of the analysis.
+
+# Conclusion
+
+This project used daily trading data from China’s national emissions trading system (ETS) to examine time trends in carbon prices, changes in trading activity, and the relationship between trading volume and carbon price behavior from 2021 to 2026.
+
+The results showed that carbon prices increased significantly over the study period, although the increase was not smooth and included several distinct phases of rise, decline, and recovery. Trading activity also changed significantly over time, but the pattern was highly uneven, with activity concentrated in a number of large spikes rather than following a steady path. In addition, higher trading volume was significantly associated with both higher closing prices and larger daily price ranges, suggesting that more active trading days tended to coincide with stronger price movement.
+
+Taken together, these findings suggest that China’s national ETS became more active and economically meaningful over time, while still displaying irregular and developing market dynamics. The analyses also show that simple statistical models can identify broad trends and associations in the carbon market, even though they do not fully capture the complexity of market behavior.
+
+More broadly, this project demonstrates how an environmental policy market can be analyzed using a reproducible data workflow in R. Although the results do not establish causality, they provide evidence that the national ETS has evolved substantially since launch and that its price and trading patterns reflect an increasingly active policy instrument within China’s climate governance system.
+
+# References
+Ellerman, A. D., Convery, F. J., & de Perthuis, C. (2010). Pricing carbon: The European Union emissions trading scheme. Cambridge University Press.
+
+Martin, R., Muûls, M., de Preux, L. B., & Wagner, U. J. (2016). The impact of the European Union emissions trading scheme on regulated firms: What is the evidence after ten years? Review of Environmental Economics and Policy, 10(1), 129–148. https://doi.org/10.1093/reep/rev016
+
+Ministry of Ecology and Environment of the People’s Republic of China. (2025). Notice on issuing the work plan for covering the steel, cement, and aluminum smelting industries in the national carbon emission trading market. https://www.mee.gov.cn/xxgk2018/xxgk/xxgk03/202503/t20250326_1104736.html
+
+Ministry of Ecology and Environment of the People’s Republic of China. (2026). Notice on work arrangements for the national carbon emission trading market in 2026. https://www.mee.gov.cn/xxgk2018/xxgk/xxgk06/202602/t20260209_1143900.html
+
+World Bank. (2024). State and trends of carbon pricing 2024. https://documents1.worldbank.org/curated/en/099081624122529330/pdf/P50228315fd8d1050186341ea02e1c107bc.pdf
